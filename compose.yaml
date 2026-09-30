@@ -1,0 +1,113 @@
+name: clickhouse-vs-postgres
+
+x-backend: &backend
+  image: clickhouse-vs-postgres-backend:local
+  build: ./backend
+  restart: unless-stopped
+  healthcheck:
+    test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8080/api/health"]
+    interval: 10s
+    timeout: 5s
+    retries: 5
+    start_period: 10s
+
+x-frontend: &frontend
+  image: clickhouse-vs-postgres-frontend:local
+  build: ./frontend
+  restart: unless-stopped
+  healthcheck:
+    test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1/api/health"]
+    interval: 10s
+    timeout: 5s
+    retries: 5
+    start_period: 10s
+
+services:
+  ch-front:
+    <<: *frontend
+    environment:
+      API_UPSTREAM: ch-back:8080
+    ports:
+      - "127.0.0.1:${CH_FRONT_PORT:-3001}:80"
+    depends_on:
+      ch-back:
+        condition: service_healthy
+    networks: [ch]
+
+  ch-back:
+    <<: *backend
+    environment:
+      DATABASE_DRIVER: clickhouse
+      DATABASE_URL: clickhouse://app:app@ch-db:9000/app
+    ports:
+      - "127.0.0.1:${CH_BACK_PORT:-8081}:8080"
+    depends_on:
+      ch-db:
+        condition: service_healthy
+    networks: [ch]
+
+  ch-db:
+    image: clickhouse/clickhouse-server:26.3-alpine
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_DB: app
+      CLICKHOUSE_USER: app
+      CLICKHOUSE_PASSWORD: app
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    volumes:
+      - ch-data:/var/lib/clickhouse
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--user", "app", "--password", "app", "--database", "app", "--query", "SELECT 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks: [ch]
+
+  ps-front:
+    <<: *frontend
+    environment:
+      API_UPSTREAM: ps-back:8080
+    ports:
+      - "127.0.0.1:${PS_FRONT_PORT:-3002}:80"
+    depends_on:
+      ps-back:
+        condition: service_healthy
+    networks: [ps]
+
+  ps-back:
+    <<: *backend
+    environment:
+      DATABASE_DRIVER: postgres
+      DATABASE_URL: postgres://app:app@ps-db:5432/app?sslmode=disable
+    ports:
+      - "127.0.0.1:${PS_BACK_PORT:-8082}:8080"
+    depends_on:
+      ps-db:
+        condition: service_healthy
+    networks: [ps]
+
+  ps-db:
+    image: postgres:18.3-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: app
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app
+    volumes:
+      - ps-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app -d app"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks: [ps]
+
+networks:
+  ch:
+  ps:
+
+volumes:
+  ch-data:
+  ps-data:
