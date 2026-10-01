@@ -10,15 +10,22 @@ import (
 	"example.com/clickhouse-vs-postgres/backend/internal/analytics"
 )
 
+// MigrateSchema applies only versioned Goose SQL, without seeding application data.
+// There must be one migration writer per database; make migrate stops the servers.
+func (s *store) MigrateSchema(ctx context.Context) error {
+	if _, err := s.migrations.Up(ctx); err != nil {
+		return fmt.Errorf("schema migration: %w", err)
+	}
+	return nil
+}
+
 // Migrate is the sole analytics seed writer. Each stack has one backend; readiness remains off
 // until schema, deterministic seed and native indexes are complete.
 // A durable checkpoint follows each synchronous batch insert. After an interrupted
 // insert/checkpoint pair, remove only the uncheckpointed tail before replaying.
 func (s *store) Migrate(ctx context.Context, target int64) error {
-	for _, query := range s.dialect.schema {
-		if err := s.exec(ctx, query); err != nil {
-			return fmt.Errorf("schema migration: %w", err)
-		}
+	if err := s.MigrateSchema(ctx); err != nil {
+		return err
 	}
 	completed, err := s.seedCheckpoint(ctx, target)
 	if err != nil {

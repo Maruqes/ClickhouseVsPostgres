@@ -4,26 +4,29 @@ package database
 import (
 	"context"
 	"database/sql"
-	"example.com/clickhouse-vs-postgres/backend/migrations"
 	"fmt"
-	"strings"
+	"io/fs"
 	"time"
 
 	"example.com/clickhouse-vs-postgres/backend/internal/analytics"
 	"example.com/clickhouse-vs-postgres/backend/internal/classes"
+	"example.com/clickhouse-vs-postgres/backend/migrations"
+	"github.com/pressly/goose/v3"
 )
 
 type Store interface {
 	classes.Storage
 	Ping(context.Context) error
+	MigrateSchema(context.Context) error
 	Migrate(context.Context, int64) error
 	Country(context.Context, analytics.Filter, bool) (analytics.Result, error)
 	Close() error
 }
 
 type store struct {
-	db      *sql.DB
-	dialect dialect
+	db         *sql.DB
+	dialect    dialect
+	migrations *goose.Provider
 }
 
 func Open(driver, dsn string) (Store, error) {
@@ -34,20 +37,9 @@ func Open(driver, dsn string) (Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	schema, err := migrations.Files.ReadFile(driver + ".sql")
+	schema, err := fs.Sub(migrations.Files, driver)
 	if err != nil {
 		return nil, err
-	}
-	var schemaSQL strings.Builder
-	for _, line := range strings.Split(string(schema), "\n") {
-		if !strings.HasPrefix(strings.TrimSpace(line), "--") {
-			schemaSQL.WriteString(line + "\n")
-		}
-	}
-	for _, statement := range strings.Split(schemaSQL.String(), ";") {
-		if strings.TrimSpace(statement) != "" {
-			d.schema = append(d.schema, statement)
-		}
 	}
 	db, err := d.open(dsn)
 	if err != nil {
@@ -56,7 +48,12 @@ func Open(driver, dsn string) (Store, error) {
 	db.SetMaxOpenConns(40)
 	db.SetMaxIdleConns(40)
 	db.SetConnMaxLifetime(5 * time.Minute)
-	return &store{db: db, dialect: d}, nil
+	provider, err := goose.NewProvider(goose.Dialect(driver), db, schema, goose.WithDisableGlobalRegistry(true))
+	if err != nil {
+		db.Close()
+		return nil, fmt.Errorf("configure schema migrations: %w", err)
+	}
+	return &store{db: db, dialect: d, migrations: provider}, nil
 }
 
 func (s *store) Ping(ctx context.Context) error { return s.db.PingContext(ctx) }

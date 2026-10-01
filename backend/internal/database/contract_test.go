@@ -52,10 +52,8 @@ func analyticsStore(t *testing.T) *store {
 	}
 	s := child.(*store)
 	t.Cleanup(func() { s.Close() })
-	for _, query := range s.dialect.schema {
-		if err := s.exec(ctx, query); err != nil {
-			t.Fatal(err)
-		}
+	if err := s.MigrateSchema(ctx); err != nil {
+		t.Fatal(err)
 	}
 	return s
 }

@@ -3,5 +3,5 @@ package migrations
 
 import "embed"
 
-//go:embed *.sql
+//go:embed postgres/*.sql clickhouse/*.sql
 var Files embed.FS

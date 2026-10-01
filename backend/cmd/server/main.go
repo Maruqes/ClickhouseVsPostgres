@@ -5,6 +5,7 @@ import (
 	"errors"
 	"example.com/clickhouse-vs-postgres/backend/internal/analytics"
 	"example.com/clickhouse-vs-postgres/backend/internal/classes"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -32,6 +33,16 @@ func run() error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	if len(os.Args) > 1 {
+		if len(os.Args) != 2 || os.Args[1] != "migrate" {
+			return fmt.Errorf("usage: server [migrate]")
+		}
+		if err := store.MigrateSchema(ctx); err != nil {
+			return err
+		}
+		slog.Info("schema migrations complete")
+		return nil
+	}
 	rows, err := analytics.ConfiguredRows()
 	if err != nil {
 		return err

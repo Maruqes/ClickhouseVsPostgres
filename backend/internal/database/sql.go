@@ -8,7 +8,6 @@ import (
 // Dialect configuration is consumed by the same SQL execution and seed lifecycle.
 type dialect struct {
 	driver        string
-	schema        []string
 	series        string
 	timestamp     string
 	deleteTail    string

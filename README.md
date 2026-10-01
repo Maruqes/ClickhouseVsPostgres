@@ -18,10 +18,11 @@ Permanent parity rules live in [AGENTS.md](AGENTS.md).
 
 ## Run
 
-Requires Docker Engine and Compose v2+; host Node and Go are not required.
+Requires Docker Engine, Compose v2+ and GNU Make; host Node, Go and the Goose CLI
+are not required. Goose v3.28.0 is embedded in the shared backend binary.
 
 ```sh
-docker compose up --build -d --wait
+make up
 ```
 
 | Stack | Frontend | Backend health |
@@ -38,13 +39,68 @@ reachable and seed migrations are complete, or HTTP 503 with `{"status":"unavail
 docker compose ps
 docker compose logs -f
 python3 scripts/smoke.py
-docker compose down
+make down
 ```
 
 The smoke check requires host Python 3 and verifies service count, health, shared
 images, frontend HTML/assets, direct/proxied health, metadata, empty-country analytics, and routing parity.
-Stopping preserves data. `docker compose down -v` deletes both database volumes;
-use only for an intentional data reset.
+`make down` preserves both database volumes. The Makefile provides:
+
+| Command | Behavior |
+| --- | --- |
+| `make up` | Build and start the six services; apply pending Goose migrations, seed, and wait for health. |
+| `make down` | Stop and remove containers/networks, preserving database volumes. |
+| `make migrate` | Build the backend, stop application writers, start the databases, apply pending Goose migrations to both engines, then start the application and complete its seed. |
+| `make reset-db` | **Delete both database volumes and all their data**, then run `make up` to recreate the schema and seed. |
+| `make reset` | **Delete all volumes and containers belonging to this Compose project**, rebuild frontend/backend images with `--no-cache`, and recreate all six services, schema and seed. |
+
+`make migrate` is safe to repeat and preserves existing rows and seed checkpoints.
+If either migration fails, it leaves the application stopped for investigation;
+fix the error and rerun it. Migration execution uses temporary containers from
+the shared backend image, without adding Compose services or exposing database ports.
+`make reset-db` and `make reset` are intentional destructive resets and do not ask
+for confirmation. `make reset` rebuilds every Dockerfile layer; its cleanup is
+scoped to this Compose project. Database containers use the pinned Compose images.
+The default health wait is 900 seconds; override it with `make up WAIT_TIMEOUT=1200`.
+All targets honor Compose environment settings such as `COMPOSE_PROJECT_NAME`,
+`SEED_ROWS` and the port overrides in `.env`.
+
+Schema migrations live in `backend/migrations/postgres/` and
+`backend/migrations/clickhouse/`, with one numbered SQL file per table:
+`00001_exercises.sql`, `00002_seed_progress.sql`, `00003_demo_classes.sql`,
+and `00004_demo_reservations.sql`. Each file has Goose `Up` and `Down` sections;
+rollback order drops reservations before their referenced classes. ClickHouse
+files use `NO TRANSACTION` because its DDL is not transactional. PostgreSQL uses
+Goose's transactional default. Goose tracks applied versions in each database's
+`goose_db_version` table. The initial migrations use `IF NOT EXISTS` to adopt
+existing schemas without replacing their data. Table creation includes ClickHouse's
+durability settings; redundant `ALTER ... MODIFY SETTING` statements are omitted
+because a full reset recreates the tables. See the [Goose provider documentation](https://pressly.github.io/goose/documentation/provider/).
+
+The SQL files contain only Goose directives as comments. ClickHouse-specific syntax:
+
+- `LowCardinality(String)` dictionary-encodes repeated strings, such as the seven
+  muscle areas and 50 country codes, to improve storage and reads.
+- `ENGINE = MergeTree` selects the columnar engine that stores sorted data parts
+  and merges them in the background.
+- ClickHouse's table-level `ORDER BY` defines the physical sorting key, without
+  enforcing uniqueness; queries still use their own `ORDER BY` for result order.
+- `DateTime('UTC')` stores second-resolution timestamps; `DateTime64(3, 'UTC')`
+  stores millisecond-resolution timestamps, both with UTC as the column timezone.
+- `fsync_after_insert = 1` syncs inserted data parts to disk;
+  `fsync_part_directory = 1` syncs their directories after part operations. These
+  settings remain to preserve the documented durability conditions against
+  PostgreSQL; resetting volumes does not replace write durability.
+
+References: [LowCardinality](https://clickhouse.com/docs/reference/data-types/lowcardinality),
+[MergeTree](https://clickhouse.com/docs/engines/table-engines/mergetree-family/mergetree),
+[MergeTree settings](https://github.com/ClickHouse/ClickHouse/blob/master/src/Storages/MergeTree/MergeTreeSettings.cpp).
+
+For future schema changes, add matching numbered migrations in both folders,
+keep each migration scoped to one table, and do not edit already-applied SQL.
+The PostgreSQL analytics index remains part of seed finalization so bulk loading
+retains its existing behavior. Run migration writers one at a time per database;
+`make migrate` ensures startup migration/seed writers are stopped first.
 
 Copy `.env.example` to `.env` to customize exposed ports. Database ports are not
 published. The `app` username/password are local development defaults. Networks
@@ -53,7 +109,7 @@ and database volumes are separate for each stack. PostgreSQL 18 uses the
 
 ## Development
 
-Changes affect both stacks after `docker compose up --build -d --wait`.
+Changes affect both stacks after `make up`.
 For frontend hot reload, use Node 22.22.2+:
 
 ```sh
@@ -162,7 +218,8 @@ python3 scripts/smoke.py
 ```
 
 Database contracts use disposable test databases on the pinned running engines;
-they preserve application volumes and verify template data, migration reruns,
+they preserve application volumes and verify template data, Goose version tracking,
+legacy schema adoption, migration reruns, rollback order, failed migrations,
 stored totals, concurrent/repeat isolation, PostgreSQL's single winner, cancellation,
 and unchanged analytics. A test-only insert gate proves ClickHouse's unsafe
 interleaving; the production app contains no gate after availability reads.
@@ -181,7 +238,7 @@ These are observations from one run, including fixture setup and reconciliation;
 ClickHouse's winner count and all timings vary. This is not a throughput benchmark.
 
 The first-party source audit (`python3 scripts/shared-code.py`) currently reports
-91.72% shared code (1,241 shared / 112 engine-specific nonblank source lines), above
+90.07% shared code (1,324 shared / 146 engine-specific nonblank source lines), above
 the 90% floor. Shared SQL and fixture lifecycle count once; native migrations,
 dialect/connection setup and the protected/unprotected strategy count as specific.
 Generated map data, shadcn components/theme, dependencies, lockfiles, tests and
@@ -227,7 +284,8 @@ readouts and its accessible daily-value table preserve exact decimal strings.
 
 ### Seed migrations and recovery
 
-On startup the backend applies embedded SQL under `backend/migrations/`, then
+On startup the backend uses Goose to apply pending embedded SQL from
+`backend/migrations/<engine>/`, then
 seeds raw sets in 250,000-row batches using shared deterministic SQL formulas.
 `SEED_ROWS` defaults to **10,000,000** on both stacks and accepts 1–100,000,000.
 The `exercise-v2` generator defines 100,000 stable athletes, 21 exercise
@@ -248,7 +306,7 @@ synthetic distribution is an illustration, not a representative training dataset
 
 Readiness stays unavailable until seeding and native index setup finish. Initial
 startup or an upgrade may take several minutes; use
-`docker compose up --build -d --wait --wait-timeout 900` and follow backend logs.
+`make up` and follow backend logs.
 Completed batches have durable, version-specific checkpoints. Restart removes
 only the uncheckpointed exercise tail and replays it, so uncertain inserts do not
 duplicate sets. This assumes one seeding backend per database, as in the
