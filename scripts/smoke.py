@@ -5,7 +5,7 @@ from pathlib import Path
 import re
 import subprocess
 from urllib.error import HTTPError
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -14,9 +14,10 @@ def docker(*args):
     return subprocess.check_output(["docker", *args], cwd=ROOT, text=True).strip()
 
 
-def get(base, path):
+def get(base, path, method="GET"):
+    request = Request(base + path, method=method)
     try:
-        with urlopen(base + path, timeout=5) as response:
+        with urlopen(request, timeout=40) as response:
             return response.status, response.headers.get_content_type(), response.read()
     except HTTPError as response:
         return response.code, response.headers.get_content_type(), response.read()
@@ -59,7 +60,38 @@ def main():
         assert get(base(name), "/livez")[0] == 200
     assert get(ch, "/future-route") == page, "SPA fallback is missing"
     assert get(ps, "/future-route") == page, "SPA fallback is missing"
-    print("PASS: six healthy services; identical images, pages, assets, and API contracts.")
+    assert get(ch, "/classes") == page and get(ps, "/classes") == page, "Direct classes route/reload failed"
+    templates = [get(address, "/api/classes/demo") for address in (ch, ps)]
+    assert templates[0] == templates[1], "Demo templates differ"
+    template = json.loads(templates[0][2])
+    assert templates[0][0] == 200 and template["capacity"] == 20 and len(template["reservations"]) == 19
+    for address in (ch, ps):
+        status, _, body = get(address, "/api/classes/demo/race", "POST")
+        report = json.loads(body)
+        assert status == 200, report
+        summary = report["summary"]
+        assert [attempt["number"] for attempt in report["attempts"]] == list(range(1, 21))
+        assert summary["accepted"] + summary["rejected"] + summary["errors"] == 20
+        assert report["initial_bookings"] == 19 and report["capacity"] == 20
+        assert summary["infrastructure_errors"] == 0
+        assert report["final_bookings"] == 19 + summary["accepted"]
+        assert summary["overbooked"] == max(report["final_bookings"] - 20, 0)
+        if address == ps:
+            assert summary["accepted"] == 1 and summary["rejected"] == 19
+        print(f"Race {address}: {summary}; {report['elapsed_ms']:.2f} ms")
+    metadata_response = get(ch, "/api/dataset")
+    assert metadata_response[:2] == (200, "application/json")
+    metadata = json.loads(metadata_response[2])
+    path = f"/api/country/summary?country=ZZ&from={metadata['from']}&to={metadata['from']}"
+    for address in (ch, ps, base("ch-back"), base("ps-back")):
+        assert get(address, "/api/dataset") == metadata_response, "Dataset contract mismatch"
+        status, content_type, body = get(address, path)
+        assert (status, content_type) == (200, "application/json")
+        summary = json.loads(body)
+        assert summary.pop("query_ms") >= 0
+        assert summary["totals"] == {"volume_kg": "0.00", "athletes": 0, "sets": 0, "reps": 0}
+        assert summary["country"] == "ZZ" and summary["from"] == summary["to"] == metadata["from"]
+    print("PASS: six healthy services; identical images, pages, assets, health, metadata, and analytics contracts.")
 
 
 if __name__ == "__main__":

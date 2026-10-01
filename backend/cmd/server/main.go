@@ -2,12 +2,14 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
+	"example.com/clickhouse-vs-postgres/backend/internal/analytics"
+	"example.com/clickhouse-vs-postgres/backend/internal/classes"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -30,21 +32,23 @@ func run() error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	rows, err := analytics.ConfiguredRows()
+	if err != nil {
+		return err
+	}
+	var ready atomic.Bool
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /livez", func(w http.ResponseWriter, r *http.Request) {
-		writeStatus(w, http.StatusOK, "ok")
-	})
-	// Readiness verifies the selected database with the same response contract.
-	mux.HandleFunc("GET /api/health", func(w http.ResponseWriter, r *http.Request) {
-		pingCtx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
-		defer cancel()
-		if err := store.Ping(pingCtx); err != nil {
-			slog.Warn("database unavailable", "error", err)
-			writeStatus(w, http.StatusServiceUnavailable, "unavailable")
+	classes.Register(mux, store, &ready)
+	mux.Handle("/", analytics.Handler(store, analytics.Dataset(rows), &ready))
+	migrationErrors := make(chan error, 1)
+	go func() {
+		if err := store.Migrate(ctx, rows); err != nil {
+			migrationErrors <- err
 			return
 		}
-		writeStatus(w, http.StatusOK, "ok")
-	})
+		ready.Store(true)
+		slog.Info("dataset ready", "rows", rows)
+	}()
 	addr := os.Getenv("HTTP_ADDR")
 	if addr == "" {
 		addr = ":8080"
@@ -52,7 +56,7 @@ func run() error {
 	server := &http.Server{
 		Addr: addr, Handler: mux,
 		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       10 * time.Second, WriteTimeout: 10 * time.Second,
+		ReadTimeout:       10 * time.Second, WriteTimeout: 35 * time.Second,
 		IdleTimeout: 60 * time.Second,
 	}
 	errs := make(chan error, 1)
@@ -65,19 +69,13 @@ func run() error {
 		if !errors.Is(err, http.ErrServerClosed) {
 			return err
 		}
+	case err := <-migrationErrors:
+		_ = server.Close()
+		return err
 	case <-ctx.Done():
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		return server.Shutdown(shutdownCtx)
 	}
 	return nil
-}
-
-func writeStatus(w http.ResponseWriter, code int, status string) {
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Cache-Control", "no-store")
-	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(struct {
-		Status string `json:"status"`
-	}{Status: status})
 }

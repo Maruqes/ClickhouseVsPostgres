@@ -4,17 +4,21 @@ x-backend: &backend
   image: clickhouse-vs-postgres-backend:local
   build: ./backend
   restart: unless-stopped
+  cpus: 1
+  mem_limit: 512m
   healthcheck:
     test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8080/api/health"]
     interval: 10s
     timeout: 5s
     retries: 5
-    start_period: 10s
+    start_period: 10m
 
 x-frontend: &frontend
   image: clickhouse-vs-postgres-frontend:local
   build: ./frontend
   restart: unless-stopped
+  cpus: 1
+  mem_limit: 512m
   healthcheck:
     test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1/api/health"]
     interval: 10s
@@ -37,6 +41,7 @@ services:
   ch-back:
     <<: *backend
     environment:
+      SEED_ROWS: ${SEED_ROWS:-10000000}
       DATABASE_DRIVER: clickhouse
       DATABASE_URL: clickhouse://app:app@ch-db:9000/app
     ports:
@@ -48,6 +53,8 @@ services:
 
   ch-db:
     image: clickhouse/clickhouse-server:26.3-alpine
+    cpus: 2
+    mem_limit: 2g
     restart: unless-stopped
     environment:
       CLICKHOUSE_DB: app
@@ -78,6 +85,7 @@ services:
   ps-back:
     <<: *backend
     environment:
+      SEED_ROWS: ${SEED_ROWS:-10000000}
       DATABASE_DRIVER: postgres
       DATABASE_URL: postgres://app:app@ps-db:5432/app?sslmode=disable
     ports:
@@ -89,6 +97,9 @@ services:
 
   ps-db:
     image: postgres:18.3-alpine
+    cpus: 2
+    mem_limit: 2g
+    command: ["postgres", "-c", "max_parallel_workers_per_gather=1"]
     restart: unless-stopped
     environment:
       POSTGRES_DB: app

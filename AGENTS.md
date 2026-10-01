@@ -49,6 +49,15 @@ business features, datasets, benchmarks, or dashboards until requested.
    semantics cannot be achieved, surface the conflict before implementation rather than
    shipping different behavior.
 
+# Authorized reservation-demo exception (plan_01)
+
+Only the `/api/classes/demo/race` booking outcome may differ: PostgreSQL uses a
+READ COMMITTED transaction and class-row lock; ClickHouse deliberately uses an
+unprotected availability check followed by an insert, so it may overbook.
+Both pages, inputs, fixtures, 20 contenders, deadlines, response shapes and
+analytics semantics remain shared. This isolated demonstration is not a claim
+that ACID alone prevents races or that all ClickHouse applications overbook.
+
 # Repository map
 
 - `compose.yaml`: six services, shared images, separate networks and volumes.
